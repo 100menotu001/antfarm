@@ -1,5 +1,7 @@
 # Antfarm
 
+![Antfarm logo](assets/logo.jpeg)
+
 Antfarm installs and runs multi-agent workflows for OpenClaw. It gives you a repeatable way to spin up a set of agents, keep their workspaces in sync, and track runs by task title.
 
 **Why use Antfarm**
