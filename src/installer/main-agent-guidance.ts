@@ -8,41 +8,56 @@ const WORKFLOW_BLOCK_END = "<!-- /antfarm:workflows -->";
 const TOOLS_BLOCK = `${WORKFLOW_BLOCK_START}
 # Antfarm Workflows
 
-When the user asks about workflows or tasks:
-- Use the Antfarm workflow runner to start, update, pause, or cancel runs.
-- For status questions, look up the run by task title and ask the workflow lead for updates.
-- If the user requests changes, relay them to the workflow lead.
+Antfarm CLI is at: ~/.openclaw/workspace/antfarm/dist/cli/cli.js
 
-Default commands:
-- Start: "start workflow <name> with task: <task>"
-- Status: "workflow status <task title>"
-- Pause: "pause workflow <task title>"
-- Cancel: "cancel workflow <task title>"
+Commands:
+- Install: \`node <cli> workflow install <github-url>\`
+- Run: \`node <cli> workflow run <workflow-id> "<task>"\`
+- Status: \`node <cli> workflow status "<task title>"\`
+- Check: \`node <cli> check\` (detect completions, queue spawns)
+- Queue: \`node <cli> queue\` (list pending spawns)
+- Dequeue: \`node <cli> dequeue <file>\` (remove spawn request)
 
-If a workflow action fails, report the exact error and next steps.
+After first install, ensure the antfarm-orchestrator cron job exists (runs every 30s).
 ${WORKFLOW_BLOCK_END}
 `;
 
 const AGENTS_BLOCK = `${WORKFLOW_BLOCK_START}
 # Antfarm Workflow Policy
 
-- When a user asks to start a workflow, use the Antfarm workflow runner.
-- Do not improvise a workflow outside the runner.
-- For status questions, query the workflow run and/or the workflow lead.
-- If a workflow is blocked, communicate the exact blocker and next step.
+## Installing Workflows
 
-If the user requests a workflow change, relay it to the workflow lead.
+When user asks to install an Antfarm workflow:
+1. Run: \`cd ~/.openclaw/workspace/antfarm && node dist/cli/cli.js workflow install <url>\`
+2. Check if orchestrator cron exists: \`cron list\` and look for "antfarm-orchestrator"
+3. If no cron exists, create it:
+   \`\`\`
+   cron add with job: {
+     "name": "antfarm-orchestrator",
+     "schedule": {"kind": "every", "everyMs": 30000},
+     "payload": {"kind": "agentTurn", "message": "Antfarm orchestrator..."},
+     "sessionTarget": "isolated",
+     "delivery": {"mode": "none"},
+     "enabled": true
+   }
+   \`\`\`
+
+## Running Workflows
+
+- To start: \`antfarm workflow run <workflow-id> "<task description>"\`
+- For status: \`antfarm workflow status "<task title>"\`
+- Do not improvise workflows outside the runner.
 
 ## Workflow Orchestration (Auto-Advance)
 
 When you receive an announce from a workflow agent (label starts with "wf-"):
-1. Run: \`antfarm daemon once\` to detect completion and queue next spawn
-2. Check spawn queue: \`antfarm daemon queue\`
+1. Run: \`antfarm check\` to detect completion and queue next spawn
+2. Check spawn queue: \`antfarm queue\`
 3. For each pending request, spawn the agent:
    \`\`\`
    sessions_spawn(agentId, task, label)  // from the spawn request
    \`\`\`
-4. After spawning, dequeue: \`antfarm daemon dequeue <filename>\`
+4. After spawning, dequeue: \`antfarm dequeue <filename>\`
 
 This keeps workflows advancing automatically without manual intervention.
 ${WORKFLOW_BLOCK_END}
