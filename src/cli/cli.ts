@@ -5,6 +5,7 @@ import { getWorkflowStatus, listRuns } from "../installer/status.js";
 import { runWorkflow } from "../installer/run.js";
 import { listBundledWorkflows } from "../installer/workflow-fetch.js";
 import { readRecentLogs } from "../lib/logger.js";
+import { startDashboard } from "../server/dashboard.js";
 
 function printUsage() {
   process.stdout.write(
@@ -18,6 +19,8 @@ function printUsage() {
       "antfarm workflow run <name> <task>   Start a workflow run",
       "antfarm workflow status <query>      Check run status (task substring, run ID prefix)",
       "antfarm workflow runs                List all workflow runs",
+      "",
+      "antfarm dashboard [<port>]            Start web dashboard (default: 3333)",
       "",
       "antfarm logs [<lines>]               Show recent log entries",
     ].join("\n") + "\n",
@@ -42,6 +45,16 @@ async function main() {
       }
     }
     console.log(`\nDone. Start a workflow with: antfarm workflow run <name> "your task"`);
+    return;
+  }
+
+  if (group === "dashboard") {
+    const port = parseInt(args[1], 10) || 3333;
+    startDashboard(port);
+    // Try to open browser
+    const { exec: execCmd } = await import("node:child_process");
+    const openCmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+    execCmd(`${openCmd} http://localhost:${port}`, () => {});
     return;
   }
 
