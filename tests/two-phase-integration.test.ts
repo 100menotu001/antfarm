@@ -27,13 +27,13 @@ describe("two-phase-integration", () => {
     });
   });
 
-  // AC2: Without polling config, defaults to claude-sonnet-4-20250514
+  // AC2: Without polling config, defaults to "default" model
   // (The default polling MODEL is set in setupAgentCrons payload, not in the prompt itself.
   //  The prompt contains the WORK model. We verify default work model here.)
   describe("defaults without polling config", () => {
-    it("uses default work model (claude-opus-4-6) when no workModel specified", () => {
+    it("uses 'default' work model when no workModel specified", () => {
       const prompt = buildPollingPrompt("feature-dev", "developer");
-      assert.ok(prompt.includes('"claude-opus-4-6"'), "default work model");
+      assert.ok(prompt.includes('"default"'), "default work model");
     });
 
     it("agent id uses namespaced format (workflowId_agentId)", () => {
