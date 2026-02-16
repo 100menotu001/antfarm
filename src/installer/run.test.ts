@@ -1703,3 +1703,315 @@ describe("US-007: Integration test: Verify context is passed to step resolution"
     assert.match(claimResult.resolvedInput!, /UNKNOWN=\[missing: nonexistent_var\]/);
   });
 });
+
+describe("US-009: Integration test: Verify multiple runs can have different dry_run values", () => {
+  const testRunIds: string[] = [];
+  const workflowIds: string[] = [];
+
+  afterEach(() => {
+    for (const runId of testRunIds) {
+      cleanupTestRun(runId);
+    }
+    testRunIds.length = 0;
+  });
+
+  it("creates 3 runs with different dryRun values and verifies they are independent", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    // Test creates 3 runs: dryRun=true, dryRun=false, dryRun=undefined
+    const result1 = await runWorkflow({
+      workflowId,
+      taskTitle: "Test run with dryRun=true",
+      dryRun: true,
+    });
+    testRunIds.push(result1.id);
+
+    const result2 = await runWorkflow({
+      workflowId,
+      taskTitle: "Test run with dryRun=false",
+      dryRun: false,
+    });
+    testRunIds.push(result2.id);
+
+    const result3 = await runWorkflow({
+      workflowId,
+      taskTitle: "Test run with dryRun=undefined",
+    });
+    testRunIds.push(result3.id);
+
+    // Test queries all three runs from database
+    const db = getDb();
+    const run1 = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result1.id) as { context: string };
+    const run2 = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result2.id) as { context: string };
+    const run3 = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result3.id) as { context: string };
+
+    // Parse contexts
+    const context1 = JSON.parse(run1.context);
+    const context2 = JSON.parse(run2.context);
+    const context3 = JSON.parse(run3.context);
+
+    // Test verifies first run has context.dry_run='true'
+    assert.equal(context1.dry_run, "true", "first run should have context.dry_run='true'");
+
+    // Test verifies second run has context.dry_run='false'
+    assert.equal(context2.dry_run, "false", "second run should have context.dry_run='false'");
+
+    // Test verifies third run has context.dry_run='false' (defaults to false when undefined)
+    assert.equal(context3.dry_run, "false", "third run should have context.dry_run='false' (default)");
+
+    // Test verifies runs have different run IDs
+    assert.notEqual(result1.id, result2.id, "first and second runs should have different IDs");
+    assert.notEqual(result2.id, result3.id, "second and third runs should have different IDs");
+    assert.notEqual(result1.id, result3.id, "first and third runs should have different IDs");
+
+    // Verify all run IDs are unique
+    const runIds = [result1.id, result2.id, result3.id];
+    const uniqueIds = new Set(runIds);
+    assert.equal(uniqueIds.size, 3, "all three runs should have unique IDs");
+  });
+
+  it("verifies runs are independent and don't interfere with each other", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    // Create multiple runs
+    const result1 = await runWorkflow({
+      workflowId,
+      taskTitle: "Independent run 1",
+      dryRun: true,
+    });
+    testRunIds.push(result1.id);
+
+    const result2 = await runWorkflow({
+      workflowId,
+      taskTitle: "Independent run 2",
+      dryRun: false,
+    });
+    testRunIds.push(result2.id);
+
+    const db = getDb();
+
+    // Get contexts after both runs created
+    const run1After = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result1.id) as { context: string };
+    const run2After = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result2.id) as { context: string };
+
+    const context1After = JSON.parse(run1After.context);
+    const context2After = JSON.parse(run2After.context);
+
+    // Verify first run still has its dry_run value (not affected by second run)
+    assert.equal(
+      context1After.dry_run,
+      "true",
+      "first run should maintain its dry_run=true (not affected by second run)"
+    );
+
+    // Verify second run has correct dry_run value
+    assert.equal(
+      context2After.dry_run,
+      "false",
+      "second run should have its dry_run=false (independent from first run)"
+    );
+
+    // Verify tasks are not mixed up
+    assert.equal(
+      context1After.task,
+      "Independent run 1",
+      "first run task should not be overwritten by second run"
+    );
+    assert.equal(
+      context2After.task,
+      "Independent run 2",
+      "second run task should be preserved independently"
+    );
+  });
+
+  it("verifies context is properly isolated per run", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    
+    const customContext1 = {
+      env: "staging",
+      version: "1.0.0",
+    };
+    
+    // Create workflow with custom context
+    const workflowDir = join(os.homedir(), ".openclaw", "antfarm", "workflows", workflowId);
+    mkdirSync(workflowDir, { recursive: true });
+    
+    let contextYaml = "context:\n";
+    for (const [key, value] of Object.entries(customContext1)) {
+      contextYaml += `  ${key}: "${value}"\n`;
+    }
+    
+    const yaml = `id: ${workflowId}
+title: Test Workflow
+${contextYaml}
+notifications: {}
+agents:
+  - id: testagent
+    workspace:
+      baseDir: /tmp
+      files:
+        testfile: file.txt
+steps:
+  - id: step1
+    agent: testagent
+    input: test input
+    expects: test output
+`;
+    
+    writeFileSync(join(workflowDir, "workflow.yml"), yaml);
+
+    // Create runs with different dry_run values
+    const result1 = await runWorkflow({
+      workflowId,
+      taskTitle: "Context isolation test 1",
+      dryRun: true,
+    });
+    testRunIds.push(result1.id);
+
+    const result2 = await runWorkflow({
+      workflowId,
+      taskTitle: "Context isolation test 2",
+      dryRun: false,
+    });
+    testRunIds.push(result2.id);
+
+    const db = getDb();
+
+    // Verify each run has its own context
+    const run1 = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result1.id) as { context: string };
+    const run2 = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result2.id) as { context: string };
+
+    const context1 = JSON.parse(run1.context);
+    const context2 = JSON.parse(run2.context);
+
+    // Verify workflow context is present in both
+    assert.equal(context1.env, "staging", "run1 should have workflow context");
+    assert.equal(context1.version, "1.0.0", "run1 should have version context");
+    assert.equal(context2.env, "staging", "run2 should have same workflow context");
+    assert.equal(context2.version, "1.0.0", "run2 should have same version context");
+
+    // Verify dry_run is isolated per run
+    assert.equal(context1.dry_run, "true", "run1 dry_run should be isolated");
+    assert.equal(context2.dry_run, "false", "run2 dry_run should be isolated");
+
+    // Verify tasks are isolated per run
+    assert.equal(context1.task, "Context isolation test 1", "run1 task should be isolated");
+    assert.equal(context2.task, "Context isolation test 2", "run2 task should be isolated");
+  });
+
+  it("verifies concurrent runs maintain separate context", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    // Create multiple runs with different dry_run values
+    const promises = [
+      runWorkflow({
+        workflowId,
+        taskTitle: "Concurrent run 1",
+        dryRun: true,
+      }),
+      runWorkflow({
+        workflowId,
+        taskTitle: "Concurrent run 2",
+        dryRun: false,
+      }),
+      runWorkflow({
+        workflowId,
+        taskTitle: "Concurrent run 3",
+      }),
+    ];
+
+    const results = await Promise.all(promises);
+    testRunIds.push(...results.map(r => r.id));
+
+    const db = getDb();
+
+    // Verify each run has correct context
+    for (let i = 0; i < results.length; i++) {
+      const run = db
+        .prepare("SELECT context FROM runs WHERE id = ?")
+        .get(results[i].id) as { context: string };
+
+      const context = JSON.parse(run.context);
+
+      if (i === 0) {
+        assert.equal(context.dry_run, "true", "run 1 should have dry_run=true");
+        assert.equal(context.task, "Concurrent run 1", "run 1 should have correct task");
+      } else if (i === 1) {
+        assert.equal(context.dry_run, "false", "run 2 should have dry_run=false");
+        assert.equal(context.task, "Concurrent run 2", "run 2 should have correct task");
+      } else if (i === 2) {
+        assert.equal(context.dry_run, "false", "run 3 should have dry_run=false (default)");
+        assert.equal(context.task, "Concurrent run 3", "run 3 should have correct task");
+      }
+    }
+  });
+
+  it("verifies dry_run values remain isolated across database operations", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    // Create first run with dryRun=true
+    const result1 = await runWorkflow({
+      workflowId,
+      taskTitle: "First run",
+      dryRun: true,
+    });
+    testRunIds.push(result1.id);
+
+    // Create second run with dryRun=false
+    const result2 = await runWorkflow({
+      workflowId,
+      taskTitle: "Second run",
+      dryRun: false,
+    });
+    testRunIds.push(result2.id);
+
+    const db = getDb();
+
+    // Query both runs multiple times to ensure consistency
+    for (let i = 0; i < 3; i++) {
+      const run1 = db
+        .prepare("SELECT context FROM runs WHERE id = ?")
+        .get(result1.id) as { context: string };
+      const run2 = db
+        .prepare("SELECT context FROM runs WHERE id = ?")
+        .get(result2.id) as { context: string };
+
+      const context1 = JSON.parse(run1.context);
+      const context2 = JSON.parse(run2.context);
+
+      assert.equal(
+        context1.dry_run,
+        "true",
+        `run1 dry_run should remain 'true' on query ${i + 1}`
+      );
+      assert.equal(
+        context2.dry_run,
+        "false",
+        `run2 dry_run should remain 'false' on query ${i + 1}`
+      );
+    }
+  });
+});
