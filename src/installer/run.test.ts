@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { getDb } from "../db.js";
 import { runWorkflow } from "./run.js";
+import { claimStep } from "./step-ops.js";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
@@ -79,6 +80,47 @@ agents:
       files:
         testfile: file.txt
 ${stepsYaml}`;
+  
+  writeFileSync(join(workflowDir, "workflow.yml"), yaml);
+  
+  return workflowDir;
+}
+
+// Helper to create a workflow with template placeholders in input
+function createTestWorkflowWithTemplateInput(
+  workflowId: string,
+  inputTemplate: string,
+  customContext?: Record<string, string>
+) {
+  const workflowDir = join(os.homedir(), ".openclaw", "antfarm", "workflows", workflowId);
+  mkdirSync(workflowDir, { recursive: true });
+  
+  // Convert custom context to YAML format, quoting all values to ensure they're strings
+  let contextYaml = "context: {}";
+  if (customContext && Object.keys(customContext).length > 0) {
+    contextYaml = "context:\n";
+    for (const [key, value] of Object.entries(customContext)) {
+      // Quote all values to ensure YAML parser treats them as strings
+      contextYaml += `  ${key}: "${value}"\n`;
+    }
+  }
+  
+  const yaml = `id: ${workflowId}
+title: Test Workflow with Template
+${contextYaml}
+notifications: {}
+agents:
+  - id: testagent
+    workspace:
+      baseDir: /tmp
+      files:
+        testfile: file.txt
+steps:
+  - id: step1
+    agent: testagent
+    input: ${inputTemplate}
+    expects: test output
+`;
   
   writeFileSync(join(workflowDir, "workflow.yml"), yaml);
   
@@ -1477,5 +1519,187 @@ describe("US-006: Unit test: Verify steps created with correct initial status", 
     const stepIds = steps.map(s => s.id);
     const uniqueIds = new Set(stepIds);
     assert.equal(uniqueIds.size, steps.length, "all step IDs should be unique");
+  });
+});
+
+describe("US-007: Integration test: Verify context is passed to step resolution", () => {
+  const testRunIds: string[] = [];
+  const workflowIds: string[] = [];
+
+  afterEach(() => {
+    for (const runId of testRunIds) {
+      cleanupTestRun(runId);
+    }
+    testRunIds.length = 0;
+  });
+
+  it("resolves input template with dry_run context variable when claiming step", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    const inputTemplate = "DRY_RUN={{dry_run}} TASK={{task}}";
+    createTestWorkflowWithTemplateInput(workflowId, inputTemplate);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test template resolution",
+      dryRun: true,
+    });
+    testRunIds.push(result.id);
+
+    // Claim the step with correct agent ID format: workflow_id + "_" + agent_name
+    const agentId = `${workflowId}_testagent`;
+    const claimResult = claimStep(agentId);
+
+    // Verify step was claimed
+    assert.equal(claimResult.found, true, "step should be found and claimed");
+    assert.ok(claimResult.resolvedInput, "resolved input should be present");
+
+    // Verify resolved input contains substituted values
+    assert.match(claimResult.resolvedInput!, /DRY_RUN=true/, "resolved input should contain dry_run=true");
+    assert.match(claimResult.resolvedInput!, /TASK=Test template resolution/, "resolved input should contain task title");
+  });
+
+  it("verifies dry_run is available as template variable in input when claimed", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    const inputTemplate = "dry_run_flag={{dry_run}}";
+    createTestWorkflowWithTemplateInput(workflowId, inputTemplate);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Dry run flag test",
+      dryRun: false,
+    });
+    testRunIds.push(result.id);
+
+    const agentId = `${workflowId}_testagent`;
+    const claimResult = claimStep(agentId);
+
+    assert.equal(claimResult.found, true);
+    assert.ok(claimResult.resolvedInput);
+    assert.equal(claimResult.resolvedInput, "dry_run_flag=false", "dry_run should be resolved to false");
+  });
+
+  it("verifies task context variable is available in resolved input when claiming step", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    const inputTemplate = "TASK={{task}}";
+    createTestWorkflowWithTemplateInput(workflowId, inputTemplate);
+
+    const taskTitle = "My important task";
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle,
+    });
+    testRunIds.push(result.id);
+
+    const agentId = `${workflowId}_testagent`;
+    const claimResult = claimStep(agentId);
+
+    assert.equal(claimResult.found, true);
+    assert.ok(claimResult.resolvedInput);
+    assert.equal(claimResult.resolvedInput, `TASK=${taskTitle}`, "task should be resolved from context");
+  });
+
+  it("verifies other context variables are available in resolved input when claiming step", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    const customContext = {
+      custom_var: "custom_value",
+      another_var: "another_value",
+    };
+    const inputTemplate = "VAR1={{custom_var}} VAR2={{another_var}} RUN_ID={{run_id}}";
+    createTestWorkflowWithTemplateInput(workflowId, inputTemplate, customContext);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Context vars test",
+    });
+    testRunIds.push(result.id);
+
+    const agentId = `${workflowId}_testagent`;
+    const claimResult = claimStep(agentId);
+
+    assert.equal(claimResult.found, true);
+    assert.ok(claimResult.resolvedInput);
+    assert.match(claimResult.resolvedInput!, /VAR1=custom_value/, "custom_var should be resolved");
+    assert.match(claimResult.resolvedInput!, /VAR2=another_value/, "another_var should be resolved");
+    assert.match(claimResult.resolvedInput!, /RUN_ID=/, "run_id should be injected and resolved");
+    assert.match(claimResult.resolvedInput!, new RegExp(`RUN_ID=${result.id}`), "run_id should match the created run");
+  });
+
+  it("verifies claimStep provides run_id as template variable for scoped progress files", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    const inputTemplate = "PROGRESS_FILE=progress-{{run_id}}.txt";
+    createTestWorkflowWithTemplateInput(workflowId, inputTemplate);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Progress file test",
+    });
+    testRunIds.push(result.id);
+
+    const agentId = `${workflowId}_testagent`;
+    const claimResult = claimStep(agentId);
+
+    assert.equal(claimResult.found, true);
+    assert.ok(claimResult.resolvedInput);
+    assert.equal(
+      claimResult.resolvedInput,
+      `PROGRESS_FILE=progress-${result.id}.txt`,
+      "run_id should be available for scoped progress files"
+    );
+  });
+
+  it("verifies multiple context variables including dry_run work in complex templates", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    const customContext = {
+      repo: "https://github.com/example/repo",
+      branch: "main",
+    };
+    const inputTemplate = "TASK={{task}} DRY_RUN={{dry_run}} REPO={{repo}} BRANCH={{branch}} RUN={{run_id}}";
+    createTestWorkflowWithTemplateInput(workflowId, inputTemplate, customContext);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Complex template test",
+      dryRun: true,
+    });
+    testRunIds.push(result.id);
+
+    const agentId = `${workflowId}_testagent`;
+    const claimResult = claimStep(agentId);
+
+    assert.equal(claimResult.found, true);
+    assert.ok(claimResult.resolvedInput);
+    // Verify all variables are resolved
+    assert.match(claimResult.resolvedInput!, /TASK=Complex template test/);
+    assert.match(claimResult.resolvedInput!, /DRY_RUN=true/);
+    assert.match(claimResult.resolvedInput!, /REPO=https:\/\/github.com\/example\/repo/);
+    assert.match(claimResult.resolvedInput!, /BRANCH=main/);
+    assert.match(claimResult.resolvedInput!, new RegExp(`RUN=${result.id}`));
+  });
+
+  it("verifies missing context variables are replaced with [missing: key] placeholder", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    const inputTemplate = "KNOWN={{task}} UNKNOWN={{nonexistent_var}}";
+    createTestWorkflowWithTemplateInput(workflowId, inputTemplate);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Missing var test",
+    });
+    testRunIds.push(result.id);
+
+    const agentId = `${workflowId}_testagent`;
+    const claimResult = claimStep(agentId);
+
+    assert.equal(claimResult.found, true);
+    assert.ok(claimResult.resolvedInput);
+    assert.match(claimResult.resolvedInput!, /KNOWN=Missing var test/);
+    assert.match(claimResult.resolvedInput!, /UNKNOWN=\[missing: nonexistent_var\]/);
   });
 });
