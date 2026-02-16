@@ -198,3 +198,205 @@ describe("runWorkflow - dry_run context variable", () => {
     assert.ok(context.dry_run !== undefined, "context should have dry_run field");
   });
 });
+
+describe("dry_run context is accessible in step templates", () => {
+  const testRunIds: string[] = [];
+  const workflowIds: string[] = [];
+
+  afterEach(() => {
+    for (const runId of testRunIds) {
+      cleanupTestRun(runId);
+    }
+    testRunIds.length = 0;
+  });
+
+  it("dry_run context variable is included in run context JSON stored in database", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test dry_run in context",
+      dryRun: true,
+    });
+    testRunIds.push(result.id);
+
+    // Query database for run context
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    const context = JSON.parse(run.context);
+    assert.ok("dry_run" in context, "dry_run should be in context");
+    assert.equal(context.dry_run, "true", "dry_run should be 'true' when dryRun=true");
+  });
+
+  it("context JSON is valid and parseable", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test context JSON validity",
+      dryRun: false,
+    });
+    testRunIds.push(result.id);
+
+    // Query database and verify context is valid JSON
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    let parsedContext: Record<string, string>;
+    try {
+      parsedContext = JSON.parse(run.context);
+    } catch (err) {
+      assert.fail(`context should be valid JSON, got error: ${(err as Error).message}`);
+    }
+
+    // Verify context has expected fields
+    assert.ok(parsedContext, "context should parse successfully");
+    assert.ok("dry_run" in parsedContext, "parsed context should have dry_run field");
+    assert.ok("task" in parsedContext, "parsed context should have task field");
+  });
+
+  it("dry_run is available for template interpolation via {{dry_run}} placeholders", async () => {
+    const { resolveTemplate } = await import("./step-ops.js");
+
+    // Test template with dry_run placeholder
+    const template = "Running in mode: {{dry_run}}";
+    const context: Record<string, string> = {
+      dry_run: "true",
+      task: "Test task",
+    };
+
+    const resolved = resolveTemplate(template, context);
+    assert.equal(resolved, "Running in mode: true", "{{dry_run}} placeholder should be replaced");
+  });
+
+  it("dry_run placeholder resolution works for both true and false values", async () => {
+    const { resolveTemplate } = await import("./step-ops.js");
+
+    // Test with dry_run = "true"
+    const contextTrue: Record<string, string> = { dry_run: "true" };
+    const resolvedTrue = resolveTemplate("{{dry_run}}", contextTrue);
+    assert.equal(resolvedTrue, "true", "{{dry_run}} should resolve to 'true'");
+
+    // Test with dry_run = "false"
+    const contextFalse: Record<string, string> = { dry_run: "false" };
+    const resolvedFalse = resolveTemplate("{{dry_run}}", contextFalse);
+    assert.equal(resolvedFalse, "false", "{{dry_run}} should resolve to 'false'");
+  });
+
+  it("context from database can be used for template resolution", async () => {
+    const { resolveTemplate } = await import("./step-ops.js");
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    // Create run with dryRun=true
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Template resolution test",
+      dryRun: true,
+    });
+    testRunIds.push(result.id);
+
+    // Retrieve context from database
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    const context = JSON.parse(run.context);
+
+    // Use context to resolve template
+    const template = "Task: {{task}}, Dry run: {{dry_run}}";
+    const resolved = resolveTemplate(template, context);
+
+    assert.equal(
+      resolved,
+      "Task: Template resolution test, Dry run: true",
+      "template should resolve using database context"
+    );
+  });
+
+  it("multiple context variables including dry_run work in complex templates", async () => {
+    const { resolveTemplate } = await import("./step-ops.js");
+
+    const context: Record<string, string> = {
+      task: "Deploy app",
+      dry_run: "false",
+      run_id: "abc123",
+      branch: "main",
+    };
+
+    const template =
+      "Task: {{task}} | Branch: {{branch}} | Dry run: {{dry_run}} | Run ID: {{run_id}}";
+    const resolved = resolveTemplate(template, context);
+
+    assert.equal(
+      resolved,
+      "Task: Deploy app | Branch: main | Dry run: false | Run ID: abc123",
+      "complex template with dry_run should resolve correctly"
+    );
+  });
+
+  it("missing dry_run in context returns [missing: dry_run] placeholder", async () => {
+    const { resolveTemplate } = await import("./step-ops.js");
+
+    const context: Record<string, string> = {
+      task: "Some task",
+    };
+
+    const template = "Dry run mode: {{dry_run}}";
+    const resolved = resolveTemplate(template, context);
+
+    assert.equal(
+      resolved,
+      "Dry run mode: [missing: dry_run]",
+      "missing dry_run should show placeholder"
+    );
+  });
+
+  it("dry_run is present after multiple context updates", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test context updates",
+      dryRun: true,
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+
+    // Initial context should have dry_run
+    let run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+    let context = JSON.parse(run.context);
+    assert.equal(context.dry_run, "true", "initial context should have dry_run");
+
+    // Simulate updating context (as step-ops.ts does)
+    context.new_field = "new_value";
+    db.prepare("UPDATE runs SET context = ? WHERE id = ?").run(
+      JSON.stringify(context),
+      result.id
+    );
+
+    // Verify dry_run still exists after update
+    run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+    context = JSON.parse(run.context);
+    assert.equal(context.dry_run, "true", "dry_run should persist after context updates");
+    assert.equal(context.new_field, "new_value", "new fields should be preserved");
+  });
+});
