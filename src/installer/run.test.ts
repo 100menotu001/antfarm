@@ -8,13 +8,23 @@ import { join } from "node:path";
 import os from "node:os";
 
 // Helper to create a minimal workflow spec for testing
-function createTestWorkflow(workflowId: string) {
+function createTestWorkflow(workflowId: string, customContext?: Record<string, string>) {
   const workflowDir = join(os.homedir(), ".openclaw", "antfarm", "workflows", workflowId);
   mkdirSync(workflowDir, { recursive: true });
   
+  // Convert custom context to YAML format, quoting all values to ensure they're strings
+  let contextYaml = "context: {}";
+  if (customContext && Object.keys(customContext).length > 0) {
+    contextYaml = "context:\n";
+    for (const [key, value] of Object.entries(customContext)) {
+      // Quote all values to ensure YAML parser treats them as strings
+      contextYaml += `  ${key}: "${value}"\n`;
+    }
+  }
+  
   const yaml = `id: ${workflowId}
 title: Test Workflow
-context: {}
+${contextYaml}
 notifications: {}
 agents:
   - id: testagent
@@ -820,5 +830,316 @@ describe("US-005: dry_run is a string (not boolean) for template compatibility",
     // Specifically verify dry_run
     assert.strictEqual(typeof context.dry_run, "string", "dry_run specifically must be string");
     assert.strictEqual(typeof context.task, "string", "task field must be string");
+  });
+});
+
+describe("US-006: Verify other context variables are preserved when dry_run is set", () => {
+  const testRunIds: string[] = [];
+  const workflowIds: string[] = [];
+
+  afterEach(() => {
+    for (const runId of testRunIds) {
+      cleanupTestRun(runId);
+    }
+    testRunIds.length = 0;
+  });
+
+  it("when dry_run is set, the task context variable is still present", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    const taskTitle = "Test task preservation with dry_run";
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle,
+      dryRun: true,
+    });
+    testRunIds.push(result.id);
+
+    // Query database to verify task is preserved
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    const context = JSON.parse(run.context);
+    assert.ok("task" in context, "task should be in context when dry_run is set");
+    assert.equal(context.task, taskTitle, "task value should match the provided title");
+  });
+
+  it("when dry_run is set, other workflow context variables are preserved", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    
+    // Create workflow with custom context variables
+    const customContext = {
+      environment: "staging",
+      region: "us-east-1",
+      team: "platform",
+    };
+    createTestWorkflow(workflowId, customContext);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test context preservation",
+      dryRun: true,
+    });
+    testRunIds.push(result.id);
+
+    // Query database and verify all context variables are preserved
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    const context = JSON.parse(run.context);
+    
+    // Verify custom context is preserved
+    assert.equal(context.environment, "staging", "environment context should be preserved");
+    assert.equal(context.region, "us-east-1", "region context should be preserved");
+    assert.equal(context.team, "platform", "team context should be preserved");
+    
+    // Verify dry_run was added
+    assert.equal(context.dry_run, "true", "dry_run should be present");
+    
+    // Verify task was set
+    assert.equal(context.task, "Test context preservation", "task should be present");
+  });
+
+  it("all context variables are accessible in database stored context", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    
+    const customContext = {
+      app_name: "api-service",
+      version: "1.2.3",
+      config_mode: "production",
+    };
+    createTestWorkflow(workflowId, customContext);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Database context access test",
+      dryRun: false,
+    });
+    testRunIds.push(result.id);
+
+    // Query database and verify context is accessible
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    // Parse and verify context is valid JSON
+    let context: Record<string, string>;
+    try {
+      context = JSON.parse(run.context);
+    } catch (err) {
+      assert.fail("context should be valid JSON");
+    }
+
+    // Verify all context variables are accessible
+    assert.ok(Object.keys(context).includes("app_name"), "app_name should be in context");
+    assert.ok(Object.keys(context).includes("version"), "version should be in context");
+    assert.ok(Object.keys(context).includes("config_mode"), "config_mode should be in context");
+    assert.ok(Object.keys(context).includes("task"), "task should be in context");
+    assert.ok(Object.keys(context).includes("dry_run"), "dry_run should be in context");
+
+    // Verify values are correct
+    assert.equal(context.app_name, "api-service");
+    assert.equal(context.version, "1.2.3");
+    assert.equal(context.config_mode, "production");
+    assert.equal(context.task, "Database context access test");
+    assert.equal(context.dry_run, "false");
+  });
+
+  it("context preservation works with dry_run=true and multiple workflow variables", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    
+    const customContext = {
+      build_number: "12345",
+      commit_sha: "abc123def456",
+      branch: "main",
+      deployment_target: "kubernetes",
+    };
+    createTestWorkflow(workflowId, customContext);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Complex context preservation",
+      dryRun: true,
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    const context = JSON.parse(run.context);
+
+    // All workflow context should be preserved
+    assert.equal(context.build_number, "12345");
+    assert.equal(context.commit_sha, "abc123def456");
+    assert.equal(context.branch, "main");
+    assert.equal(context.deployment_target, "kubernetes");
+    
+    // Standard fields should be present
+    assert.equal(context.task, "Complex context preservation");
+    assert.equal(context.dry_run, "true");
+  });
+
+  it("context variables are not overwritten when dry_run is added", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    
+    const customContext = {
+      database_url: "postgres://localhost",
+      api_key: "secret-key-123",
+    };
+    createTestWorkflow(workflowId, customContext);
+
+    // Create run without dry_run
+    const result1 = await runWorkflow({
+      workflowId,
+      taskTitle: "First run",
+    });
+    testRunIds.push(result1.id);
+
+    // Create run with dry_run
+    const result2 = await runWorkflow({
+      workflowId,
+      taskTitle: "Second run",
+      dryRun: true,
+    });
+    testRunIds.push(result2.id);
+
+    const db = getDb();
+
+    // Check first run
+    const run1 = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result1.id) as { context: string };
+    const context1 = JSON.parse(run1.context);
+
+    // Check second run
+    const run2 = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result2.id) as { context: string };
+    const context2 = JSON.parse(run2.context);
+
+    // Both should have workflow context preserved
+    assert.equal(context1.database_url, "postgres://localhost");
+    assert.equal(context1.api_key, "secret-key-123");
+    assert.equal(context2.database_url, "postgres://localhost");
+    assert.equal(context2.api_key, "secret-key-123");
+
+    // Only difference should be the dry_run and task values
+    assert.equal(context1.dry_run, "false");
+    assert.equal(context2.dry_run, "true");
+    assert.equal(context1.task, "First run");
+    assert.equal(context2.task, "Second run");
+  });
+
+  it("all context fields are strings even with workflow-defined context", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    
+    const customContext = {
+      numeric_value: "42",
+      boolean_string: "true",
+      text_value: "example text",
+    };
+    createTestWorkflow(workflowId, customContext);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Type checking test",
+      dryRun: true,
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    const context = JSON.parse(run.context);
+
+    // All values should be strings
+    for (const [key, value] of Object.entries(context)) {
+      assert.strictEqual(
+        typeof value,
+        "string",
+        `context field '${key}' should be string, got ${typeof value}`
+      );
+    }
+
+    // Verify specific values
+    assert.equal(context.numeric_value, "42");
+    assert.equal(context.boolean_string, "true");
+    assert.equal(context.text_value, "example text");
+  });
+
+  it("empty workflow context does not prevent dry_run and task from being set", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    
+    // Create workflow without custom context
+    createTestWorkflow(workflowId, {});
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Empty context test",
+      dryRun: true,
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    const context = JSON.parse(run.context);
+
+    // Even with empty workflow context, dry_run and task should be present
+    assert.equal(context.dry_run, "true", "dry_run should be set");
+    assert.equal(context.task, "Empty context test", "task should be set");
+  });
+
+  it("order of context variables does not matter for preservation", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    
+    const customContext = {
+      z_field: "last",
+      a_field: "first",
+      m_field: "middle",
+    };
+    createTestWorkflow(workflowId, customContext);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Order test",
+      dryRun: false,
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    const context = JSON.parse(run.context);
+
+    // All context should be preserved regardless of order
+    assert.ok("z_field" in context);
+    assert.ok("a_field" in context);
+    assert.ok("m_field" in context);
+    assert.equal(context.z_field, "last");
+    assert.equal(context.a_field, "first");
+    assert.equal(context.m_field, "middle");
   });
 });
