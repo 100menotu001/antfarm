@@ -44,6 +44,47 @@ steps:
   return workflowDir;
 }
 
+// Helper to create a workflow with multiple steps for testing
+function createTestWorkflowWithMultipleSteps(workflowId: string, stepCount: number, customContext?: Record<string, string>) {
+  const workflowDir = join(os.homedir(), ".openclaw", "antfarm", "workflows", workflowId);
+  mkdirSync(workflowDir, { recursive: true });
+  
+  // Convert custom context to YAML format, quoting all values to ensure they're strings
+  let contextYaml = "context: {}";
+  if (customContext && Object.keys(customContext).length > 0) {
+    contextYaml = "context:\n";
+    for (const [key, value] of Object.entries(customContext)) {
+      // Quote all values to ensure YAML parser treats them as strings
+      contextYaml += `  ${key}: "${value}"\n`;
+    }
+  }
+  
+  // Generate steps YAML dynamically based on stepCount
+  let stepsYaml = "steps:\n";
+  for (let i = 1; i <= stepCount; i++) {
+    stepsYaml += `  - id: step${i}\n`;
+    stepsYaml += `    agent: testagent\n`;
+    stepsYaml += `    input: test input ${i}\n`;
+    stepsYaml += `    expects: test output ${i}\n`;
+  }
+  
+  const yaml = `id: ${workflowId}
+title: Test Workflow
+${contextYaml}
+notifications: {}
+agents:
+  - id: testagent
+    workspace:
+      baseDir: /tmp
+      files:
+        testfile: file.txt
+${stepsYaml}`;
+  
+  writeFileSync(join(workflowDir, "workflow.yml"), yaml);
+  
+  return workflowDir;
+}
+
 // Helper to cleanup test run from database
 function cleanupTestRun(runId: string) {
   const db = getDb();
@@ -1304,5 +1345,137 @@ describe("US-006: Verify other context variables are preserved when dry_run is s
     assert.equal(context.z_field, "last");
     assert.equal(context.a_field, "first");
     assert.equal(context.m_field, "middle");
+  });
+});
+
+describe("US-006: Unit test: Verify steps created with correct initial status", () => {
+  const testRunIds: string[] = [];
+  const workflowIds: string[] = [];
+
+  afterEach(() => {
+    for (const runId of testRunIds) {
+      cleanupTestRun(runId);
+    }
+    testRunIds.length = 0;
+  });
+
+  it("creates correct number of steps when runWorkflow executes with multiple steps", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    const stepCount = 5;
+    createTestWorkflowWithMultipleSteps(workflowId, stepCount);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test with multiple steps",
+    });
+    testRunIds.push(result.id);
+
+    // Query the database to verify steps were created
+    const db = getDb();
+    const steps = db
+      .prepare("SELECT * FROM steps WHERE run_id = ? ORDER BY step_index ASC")
+      .all(result.id) as Array<{ step_index: number }>;
+
+    assert.equal(steps.length, stepCount, `should create ${stepCount} steps`);
+  });
+
+  it("verifies first step has status 'pending' when runWorkflow executes", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflowWithMultipleSteps(workflowId, 3);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test first step status",
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const firstStep = db
+      .prepare("SELECT status FROM steps WHERE run_id = ? AND step_index = 0")
+      .get(result.id) as { status: string };
+
+    assert.equal(firstStep.status, "pending", "first step should have status 'pending'");
+  });
+
+  it("verifies subsequent steps have status 'waiting' when runWorkflow executes", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflowWithMultipleSteps(workflowId, 4);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test subsequent steps status",
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const subsequentSteps = db
+      .prepare("SELECT status, step_index FROM steps WHERE run_id = ? AND step_index > 0 ORDER BY step_index ASC")
+      .all(result.id) as Array<{ status: string; step_index: number }>;
+
+    for (const step of subsequentSteps) {
+      assert.equal(step.status, "waiting", `step at index ${step.step_index} should have status 'waiting'`);
+    }
+  });
+
+  it("verifies step_index fields are sequential when runWorkflow creates steps", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    const stepCount = 6;
+    createTestWorkflowWithMultipleSteps(workflowId, stepCount);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test sequential step indices",
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const steps = db
+      .prepare("SELECT step_index FROM steps WHERE run_id = ? ORDER BY step_index ASC")
+      .all(result.id) as Array<{ step_index: number }>;
+
+    for (let i = 0; i < steps.length; i++) {
+      assert.equal(steps[i].step_index, i, `step at position ${i} should have step_index=${i}`);
+    }
+  });
+
+  it("verifies all steps created correctly with mixed status values", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    const stepCount = 3;
+    createTestWorkflowWithMultipleSteps(workflowId, stepCount);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test all steps structure",
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const steps = db
+      .prepare("SELECT id, run_id, step_index, status FROM steps WHERE run_id = ? ORDER BY step_index ASC")
+      .all(result.id) as Array<{ id: string; run_id: string; step_index: number; status: string }>;
+
+    // Verify correct count
+    assert.equal(steps.length, stepCount, `should have ${stepCount} steps`);
+
+    // Verify status progression
+    assert.equal(steps[0].status, "pending", "first step should be pending");
+    for (let i = 1; i < steps.length; i++) {
+      assert.equal(steps[i].status, "waiting", `step ${i} should be waiting`);
+    }
+
+    // Verify all steps belong to correct run
+    for (const step of steps) {
+      assert.equal(step.run_id, result.id, "all steps should belong to the created run");
+    }
+
+    // Verify step IDs are unique
+    const stepIds = steps.map(s => s.id);
+    const uniqueIds = new Set(stepIds);
+    assert.equal(uniqueIds.size, steps.length, "all step IDs should be unique");
   });
 });
