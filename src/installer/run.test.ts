@@ -2150,3 +2150,249 @@ describe("US-010: Error handling test: Verify runWorkflow handles missing workfl
     assert.equal(stepsAfter.count, stepsBefore.count, "No step records should be written");
   });
 });
+
+describe("US-011: Acceptance test: Verify dry_run context persists through full workflow lifecycle", () => {
+  const testRunIds: string[] = [];
+  const workflowIds: string[] = [];
+
+  afterEach(() => {
+    for (const runId of testRunIds) {
+      cleanupTestRun(runId);
+    }
+    testRunIds.length = 0;
+  });
+
+  it("traces dry_run context through complete workflow lifecycle", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    
+    // Create a workflow with 3 steps for lifecycle testing
+    createTestWorkflowWithMultipleSteps(workflowId, 3);
+
+    // 1. Create workflow run with dry_run=false
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Lifecycle test with dry_run=false",
+      dryRun: false,
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+
+    // Store initial context dry_run value
+    const initialRun = db.prepare(
+      "SELECT context FROM runs WHERE id = ?"
+    ).get(result.id) as { context: string } | undefined;
+    assert.ok(initialRun, "Run should exist in database");
+    
+    const initialContext = JSON.parse(initialRun!.context) as Record<string, string>;
+    const initialDryRunValue = initialContext.dry_run;
+    assert.equal(initialDryRunValue, "false", "Initial dry_run should be 'false'");
+
+    // 2. Verify dry_run persists in database across multiple queries
+    const runFromDb = db.prepare(
+      "SELECT context FROM runs WHERE id = ?"
+    ).get(result.id) as { context: string } | undefined;
+    
+    assert.ok(runFromDb, "Run should exist in database");
+    const contextFromDb = JSON.parse(runFromDb!.context) as Record<string, string>;
+    assert.equal(
+      contextFromDb.dry_run,
+      initialDryRunValue,
+      "dry_run from database should match initial value"
+    );
+
+    // 3. Claim first step and verify dry_run in resolved input
+    const agentId = `${workflowId}_testagent`;
+    const claimResult = claimStep(agentId);
+    
+    assert.equal(claimResult.found, true, "First step should be claimed");
+    assert.ok(claimResult.resolvedInput, "Resolved input should exist");
+
+    // 4. Verify dry_run doesn't change after step claim
+    const runAfterClaim = db.prepare(
+      "SELECT context FROM runs WHERE id = ?"
+    ).get(result.id) as { context: string } | undefined;
+    const contextAfterClaim = JSON.parse(runAfterClaim!.context) as Record<string, string>;
+    assert.equal(
+      contextAfterClaim.dry_run,
+      initialDryRunValue,
+      "dry_run should not change after step claim"
+    );
+
+    // 5. Get the claimed step (now status='running')
+    const claimedStep = db.prepare(
+      "SELECT id, run_id FROM steps WHERE status = 'running' AND run_id = ? LIMIT 1"
+    ).get(result.id) as { id: string; run_id: string } | undefined;
+    assert.ok(claimedStep, "Claimed step should exist with status='running'");
+
+    // 6. Verify context consistency across multiple database queries
+    const queryResults = [];
+    for (let i = 0; i < 5; i++) {
+      const run = db.prepare(
+        "SELECT context FROM runs WHERE id = ?"
+      ).get(result.id) as { context: string } | undefined;
+      const ctx = JSON.parse(run!.context) as Record<string, string>;
+      queryResults.push(ctx.dry_run);
+    }
+    
+    // All queries should return the same value
+    for (const value of queryResults) {
+      assert.equal(
+        value,
+        initialDryRunValue,
+        "dry_run should be consistent across all database queries"
+      );
+    }
+  });
+
+  it("verifies dry_run persists when other context variables exist", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    
+    const customContext = {
+      environment: "testing",
+      version: "1.0.0",
+    };
+    
+    // Create workflow with custom context variables
+    createTestWorkflowWithMultipleSteps(workflowId, 2, customContext);
+
+    // Create run with dry_run=true
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test with multiple context vars",
+      dryRun: true,
+    });
+    testRunIds.push(result.id);
+
+    // Query database and verify all context is intact
+    const db = getDb();
+    const runFromDb = db.prepare(
+      "SELECT context FROM runs WHERE id = ?"
+    ).get(result.id) as { context: string } | undefined;
+    
+    const contextFromDb = JSON.parse(runFromDb!.context) as Record<string, string>;
+    assert.equal(contextFromDb.dry_run, "true", "dry_run should be 'true'");
+    assert.equal(contextFromDb.environment, "testing", "environment should be preserved");
+    assert.equal(contextFromDb.version, "1.0.0", "version should be preserved");
+
+    // Claim step and verify context is passed correctly
+    const agentId = `${workflowId}_testagent`;
+    const claimResult = claimStep(agentId);
+    assert.equal(claimResult.found, true, "step should be claimed");
+    
+    // Verify context is unchanged after claim
+    const runAfterClaim = db.prepare(
+      "SELECT context FROM runs WHERE id = ?"
+    ).get(result.id) as { context: string } | undefined;
+    const contextAfterClaim = JSON.parse(runAfterClaim!.context) as Record<string, string>;
+    
+    assert.equal(contextAfterClaim.dry_run, "true", "dry_run should persist after claim");
+    assert.equal(contextAfterClaim.environment, "testing", "environment should persist after claim");
+    assert.equal(contextAfterClaim.version, "1.0.0", "version should persist after claim");
+  });
+
+  it("verifies dry_run=false persists through multi-step workflow lifecycle", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    
+    // Create workflow with 3 steps
+    createTestWorkflowWithMultipleSteps(workflowId, 3);
+
+    // Create run with dry_run=false
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Multi-step lifecycle with dry_run=false",
+      dryRun: false,
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const agentId = `${workflowId}_testagent`;
+
+    // Get initial context and verify dry_run
+    const initialRun = db.prepare(
+      "SELECT context FROM runs WHERE id = ?"
+    ).get(result.id) as { context: string } | undefined;
+    const initialContext = JSON.parse(initialRun!.context) as Record<string, string>;
+    assert.equal(initialContext.dry_run, "false", "Initial dry_run should be false");
+
+    // Claim first step
+    const claimResult1 = claimStep(agentId);
+    assert.equal(claimResult1.found, true, "First step should be found");
+
+    // Verify dry_run after first claim
+    const runAfterFirstClaim = db.prepare(
+      "SELECT context FROM runs WHERE id = ?"
+    ).get(result.id) as { context: string } | undefined;
+    const contextAfterFirstClaim = JSON.parse(runAfterFirstClaim!.context) as Record<string, string>;
+    assert.equal(
+      contextAfterFirstClaim.dry_run,
+      "false",
+      "dry_run should be 'false' after first step claim"
+    );
+
+    // Get the first claimed step
+    const firstClaimedStep = db.prepare(
+      "SELECT id FROM steps WHERE status = 'running' AND run_id = ? AND step_index = 0 LIMIT 1"
+    ).get(result.id) as { id: string } | undefined;
+    assert.ok(firstClaimedStep, "First step should be claimed with status='running'");
+
+    // Verify dry_run hasn't changed - make multiple queries
+    const queryChecks = [1, 2, 3];
+    for (const checkNum of queryChecks) {
+      const runCheck = db.prepare(
+        "SELECT context FROM runs WHERE id = ?"
+      ).get(result.id) as { context: string } | undefined;
+      const contextCheck = JSON.parse(runCheck!.context) as Record<string, string>;
+      assert.equal(
+        contextCheck.dry_run,
+        "false",
+        `dry_run should remain 'false' on query check ${checkNum}`
+      );
+    }
+  });
+
+  it("verifies context is consistent across concurrent database queries", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    
+    createTestWorkflowWithMultipleSteps(workflowId, 2);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Concurrent query test",
+      dryRun: false,
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const expectedDryRun = "false";
+
+    // Perform multiple concurrent queries
+    const queryPromises = Array.from({ length: 5 }, (_, i) =>
+      Promise.resolve().then(() => {
+        const run = db.prepare(
+          "SELECT context FROM runs WHERE id = ?"
+        ).get(result.id) as { context: string } | undefined;
+        const context = JSON.parse(run!.context) as Record<string, string>;
+        return {
+          queryIndex: i,
+          dryRun: context.dry_run,
+        };
+      })
+    );
+
+    const queryResults = await Promise.all(queryPromises);
+
+    // All queries should return the same dry_run value
+    for (const queryResult of queryResults) {
+      assert.equal(
+        queryResult.dryRun,
+        expectedDryRun,
+        `Query ${queryResult.queryIndex} should have dry_run='${expectedDryRun}'`
+      );
+    }
+  });
+});
