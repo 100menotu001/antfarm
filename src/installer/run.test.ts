@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { getDb } from "../db.js";
 import { runWorkflow } from "./run.js";
-import { claimStep } from "./step-ops.js";
+import { claimStep, completeStep } from "./step-ops.js";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
@@ -2394,5 +2394,337 @@ describe("US-011: Acceptance test: Verify dry_run context persists through full 
         `Query ${queryResult.queryIndex} should have dry_run='${expectedDryRun}'`
       );
     }
+  });
+});
+
+describe("US-012: Integration test: Verify workflow execution without dry-run completes successfully", () => {
+  const testRunIds: string[] = [];
+  const workflowIds: string[] = [];
+
+  afterEach(() => {
+    for (const runId of testRunIds) {
+      cleanupTestRun(runId);
+    }
+    testRunIds.length = 0;
+  });
+
+  it("simulates multi-step workflow execution and verifies all steps complete successfully", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    
+    // Create workflow with 3 steps
+    createTestWorkflowWithMultipleSteps(workflowId, 3);
+
+    // Create run without dryRun parameter (defaults to false)
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test workflow execution without dry-run",
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+
+    // Verify initial run status is 'running'
+    const initialRun = db.prepare(
+      "SELECT status, context FROM runs WHERE id = ?"
+    ).get(result.id) as { status: string; context: string } | undefined;
+    assert.ok(initialRun, "Run should exist in database");
+    assert.equal(initialRun!.status, "running", "Initial run status should be 'running'");
+
+    // Verify initial context has dry_run='false'
+    const initialContext = JSON.parse(initialRun!.context) as Record<string, string>;
+    assert.equal(initialContext.dry_run, "false", "dry_run should default to 'false'");
+
+    // Verify initial step statuses
+    const initialSteps = db.prepare(
+      "SELECT id, step_index, status FROM steps WHERE run_id = ? ORDER BY step_index ASC"
+    ).all(result.id) as Array<{ id: string; step_index: number; status: string }>;
+    assert.equal(initialSteps.length, 3, "Should have 3 steps");
+    assert.equal(initialSteps[0].status, "pending", "First step should be 'pending'");
+    assert.equal(initialSteps[1].status, "waiting", "Second step should be 'waiting'");
+    assert.equal(initialSteps[2].status, "waiting", "Third step should be 'waiting'");
+
+    const agentId = `${workflowId}_testagent`;
+    
+    // === Step 1: Claim, execute, complete ===
+    const claim1 = claimStep(agentId);
+    assert.equal(claim1.found, true, "First step should be claimed");
+
+    // Verify step 1 transitioned to 'running'
+    const step1AfterClaim = db.prepare(
+      "SELECT status FROM steps WHERE id = ?"
+    ).get(initialSteps[0].id) as { status: string };
+    assert.equal(step1AfterClaim.status, "running", "First step should be 'running' after claim");
+
+    // Complete first step
+    const stepCompleted1 = completeStep(initialSteps[0].id, "RESULT: Step 1 completed");
+    assert.equal(stepCompleted1.advanced, true, "Pipeline should advance after step 1");
+    assert.equal(stepCompleted1.runCompleted, false, "Run should not be completed after step 1");
+
+    // Verify step 1 transitioned to 'done'
+    const step1AfterComplete = db.prepare(
+      "SELECT status FROM steps WHERE id = ?"
+    ).get(initialSteps[0].id) as { status: string };
+    assert.equal(step1AfterComplete.status, "done", "First step should be 'done' after completion");
+
+    // Verify step 2 transitioned from 'waiting' to 'pending'
+    const step2AfterAdvance = db.prepare(
+      "SELECT status FROM steps WHERE id = ?"
+    ).get(initialSteps[1].id) as { status: string };
+    assert.equal(step2AfterAdvance.status, "pending", "Second step should be 'pending' after pipeline advance");
+
+    // Verify run is still 'running'
+    const runAfterStep1 = db.prepare(
+      "SELECT status FROM runs WHERE id = ?"
+    ).get(result.id) as { status: string };
+    assert.equal(runAfterStep1.status, "running", "Run should still be 'running' after step 1");
+
+    // === Step 2: Claim, execute, complete ===
+    const claim2 = claimStep(agentId);
+    assert.equal(claim2.found, true, "Second step should be claimed");
+
+    // Verify step 2 transitioned to 'running'
+    const step2AfterClaim = db.prepare(
+      "SELECT status FROM steps WHERE id = ?"
+    ).get(initialSteps[1].id) as { status: string };
+    assert.equal(step2AfterClaim.status, "running", "Second step should be 'running' after claim");
+
+    // Complete second step
+    const stepCompleted2 = completeStep(initialSteps[1].id, "RESULT: Step 2 completed");
+    assert.equal(stepCompleted2.advanced, true, "Pipeline should advance after step 2");
+    assert.equal(stepCompleted2.runCompleted, false, "Run should not be completed after step 2");
+
+    // Verify step 2 transitioned to 'done'
+    const step2AfterComplete = db.prepare(
+      "SELECT status FROM steps WHERE id = ?"
+    ).get(initialSteps[1].id) as { status: string };
+    assert.equal(step2AfterComplete.status, "done", "Second step should be 'done' after completion");
+
+    // Verify step 3 transitioned from 'waiting' to 'pending'
+    const step3AfterAdvance = db.prepare(
+      "SELECT status FROM steps WHERE id = ?"
+    ).get(initialSteps[2].id) as { status: string };
+    assert.equal(step3AfterAdvance.status, "pending", "Third step should be 'pending' after pipeline advance");
+
+    // === Step 3: Claim, execute, complete ===
+    const claim3 = claimStep(agentId);
+    assert.equal(claim3.found, true, "Third step should be claimed");
+
+    // Verify step 3 transitioned to 'running'
+    const step3AfterClaim = db.prepare(
+      "SELECT status FROM steps WHERE id = ?"
+    ).get(initialSteps[2].id) as { status: string };
+    assert.equal(step3AfterClaim.status, "running", "Third step should be 'running' after claim");
+
+    // Complete third step
+    const stepCompleted3 = completeStep(initialSteps[2].id, "RESULT: Step 3 completed");
+    assert.equal(stepCompleted3.advanced, false, "Pipeline should not advance after final step");
+    assert.equal(stepCompleted3.runCompleted, true, "Run should be completed after final step");
+
+    // Verify step 3 transitioned to 'done'
+    const step3AfterComplete = db.prepare(
+      "SELECT status FROM steps WHERE id = ?"
+    ).get(initialSteps[2].id) as { status: string };
+    assert.equal(step3AfterComplete.status, "done", "Third step should be 'done' after completion");
+
+    // Verify final run status is 'completed'
+    const finalRun = db.prepare(
+      "SELECT status, context FROM runs WHERE id = ?"
+    ).get(result.id) as { status: string; context: string };
+    assert.equal(finalRun.status, "completed", "Final run status should be 'completed'");
+
+    // Verify dry_run remains 'false' throughout
+    const finalContext = JSON.parse(finalRun.context) as Record<string, string>;
+    assert.equal(finalContext.dry_run, "false", "dry_run should remain 'false' at end");
+
+    // Verify all steps have final status 'done'
+    const allFinalSteps = db.prepare(
+      "SELECT status FROM steps WHERE run_id = ? ORDER BY step_index ASC"
+    ).all(result.id) as Array<{ status: string }>;
+    for (let i = 0; i < allFinalSteps.length; i++) {
+      assert.equal(allFinalSteps[i].status, "done", `Step ${i + 1} should have final status 'done'`);
+    }
+
+    // Verify no more steps can be claimed
+    const claimAfterCompletion = claimStep(agentId);
+    assert.equal(claimAfterCompletion.found, false, "No steps should be available after workflow completion");
+  });
+
+  it("verifies workflow execution with dryRun=false explicitly set", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    
+    createTestWorkflowWithMultipleSteps(workflowId, 2);
+
+    // Explicitly set dryRun=false
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test with explicit dryRun=false",
+      dryRun: false,
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+
+    // Verify context has dry_run='false'
+    const run = db.prepare(
+      "SELECT context FROM runs WHERE id = ?"
+    ).get(result.id) as { context: string };
+    const context = JSON.parse(run.context) as Record<string, string>;
+    assert.equal(context.dry_run, "false", "dry_run should be 'false' when explicitly set");
+
+    // Simulate execution
+    const agentId = `${workflowId}_testagent`;
+    const steps = db.prepare(
+      "SELECT id FROM steps WHERE run_id = ? ORDER BY step_index ASC"
+    ).all(result.id) as Array<{ id: string }>;
+
+    // Claim and complete step 1
+    claimStep(agentId);
+    completeStep(steps[0].id, "OUTPUT: done");
+
+    // Claim and complete step 2
+    claimStep(agentId);
+    const finalResult = completeStep(steps[1].id, "OUTPUT: done");
+    assert.equal(finalResult.runCompleted, true, "Run should complete after final step");
+
+    // Verify final run status
+    const finalRun = db.prepare(
+      "SELECT status FROM runs WHERE id = ?"
+    ).get(result.id) as { status: string };
+    assert.equal(finalRun.status, "completed", "Run should be 'completed'");
+  });
+
+  it("verifies step status transitions match expected pending->running->done sequence", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    
+    createTestWorkflowWithMultipleSteps(workflowId, 2);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test step status transitions",
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const agentId = `${workflowId}_testagent`;
+    
+    const steps = db.prepare(
+      "SELECT id FROM steps WHERE run_id = ? ORDER BY step_index ASC"
+    ).all(result.id) as Array<{ id: string }>;
+
+    // Verify initial states before any claims
+    const initialStep0 = db.prepare("SELECT status FROM steps WHERE id = ?").get(steps[0].id) as { status: string };
+    const initialStep1 = db.prepare("SELECT status FROM steps WHERE id = ?").get(steps[1].id) as { status: string };
+    assert.equal(initialStep0.status, "pending", "Step 0 should start as 'pending'");
+    assert.equal(initialStep1.status, "waiting", "Step 1 should start as 'waiting'");
+
+    // Claim and complete step 0
+    claimStep(agentId);
+    const afterClaimStep0 = db.prepare("SELECT status FROM steps WHERE id = ?").get(steps[0].id) as { status: string };
+    assert.equal(afterClaimStep0.status, "running", "Step 0 should be 'running' after claim");
+
+    completeStep(steps[0].id, "OUTPUT: done");
+    const afterCompleteStep0 = db.prepare("SELECT status FROM steps WHERE id = ?").get(steps[0].id) as { status: string };
+    assert.equal(afterCompleteStep0.status, "done", "Step 0 should be 'done' after completion");
+
+    // Verify step 1 was advanced to 'pending' by pipeline
+    const afterAdvanceStep1 = db.prepare("SELECT status FROM steps WHERE id = ?").get(steps[1].id) as { status: string };
+    assert.equal(afterAdvanceStep1.status, "pending", "Step 1 should be 'pending' after pipeline advance");
+
+    // Claim and complete step 1
+    claimStep(agentId);
+    const afterClaimStep1 = db.prepare("SELECT status FROM steps WHERE id = ?").get(steps[1].id) as { status: string };
+    assert.equal(afterClaimStep1.status, "running", "Step 1 should be 'running' after claim");
+
+    completeStep(steps[1].id, "OUTPUT: done");
+    const afterCompleteStep1 = db.prepare("SELECT status FROM steps WHERE id = ?").get(steps[1].id) as { status: string };
+    assert.equal(afterCompleteStep1.status, "done", "Step 1 should be 'done' after completion");
+  });
+
+  it("verifies dry_run='false' remains constant through complete workflow execution", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    
+    createTestWorkflowWithMultipleSteps(workflowId, 3);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test dry_run persistence through execution",
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const agentId = `${workflowId}_testagent`;
+
+    const steps = db.prepare(
+      "SELECT id FROM steps WHERE run_id = ? ORDER BY step_index ASC"
+    ).all(result.id) as Array<{ id: string }>;
+
+    // Check dry_run at multiple points during execution
+    const dryRunValues: string[] = [];
+
+    // Before execution
+    let run = db.prepare("SELECT context FROM runs WHERE id = ?").get(result.id) as { context: string };
+    let context = JSON.parse(run.context) as Record<string, string>;
+    dryRunValues.push(context.dry_run);
+
+    // After each step completion
+    for (const step of steps) {
+      claimStep(agentId);
+      completeStep(step.id, "OUTPUT: done");
+
+      run = db.prepare("SELECT context FROM runs WHERE id = ?").get(result.id) as { context: string };
+      context = JSON.parse(run.context) as Record<string, string>;
+      dryRunValues.push(context.dry_run);
+    }
+
+    // All should be 'false'
+    for (let i = 0; i < dryRunValues.length; i++) {
+      assert.equal(dryRunValues[i], "false", `dry_run should be 'false' at checkpoint ${i}`);
+    }
+  });
+
+  it("verifies run status transitions from running to completed after all steps complete", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    
+    createTestWorkflowWithMultipleSteps(workflowId, 2);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test run status transitions",
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const agentId = `${workflowId}_testagent`;
+
+    // Initial status should be 'running'
+    let run = db.prepare("SELECT status FROM runs WHERE id = ?").get(result.id) as { status: string };
+    assert.equal(run.status, "running", "Initial run status should be 'running'");
+
+    const steps = db.prepare(
+      "SELECT id FROM steps WHERE run_id = ? ORDER BY step_index ASC"
+    ).all(result.id) as Array<{ id: string }>;
+
+    // Complete all steps except the last
+    for (let i = 0; i < steps.length - 1; i++) {
+      claimStep(agentId);
+      completeStep(steps[i].id, "OUTPUT: done");
+
+      // Status should still be 'running'
+      run = db.prepare("SELECT status FROM runs WHERE id = ?").get(result.id) as { status: string };
+      assert.equal(run.status, "running", `Run should still be 'running' after step ${i + 1} completion`);
+    }
+
+    // Complete the final step
+    claimStep(agentId);
+    completeStep(steps[steps.length - 1].id, "OUTPUT: done");
+
+    // Final status should be 'completed'
+    run = db.prepare("SELECT status FROM runs WHERE id = ?").get(result.id) as { status: string };
+    assert.equal(run.status, "completed", "Final run status should be 'completed'");
   });
 });
