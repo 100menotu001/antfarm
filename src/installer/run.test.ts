@@ -563,7 +563,170 @@ describe("US-004: Unit test: Verify task and dry_run both present in context", (
   });
 });
 
-describe("US-005: dry_run is a string (not boolean) for template compatibility", () => {
+describe("US-005: Unit test: Verify run record created with dry_run in context", () => {
+  const testRunIds: string[] = [];
+  const workflowIds: string[] = [];
+
+  afterEach(() => {
+    for (const runId of testRunIds) {
+      cleanupTestRun(runId);
+    }
+    testRunIds.length = 0;
+  });
+
+  it("verifies run record created with correct workflow_id from database query", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    // Test creates run via runWorkflow
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test run record creation",
+    });
+    testRunIds.push(result.id);
+
+    // Test queries run record from database by run ID
+    const db = getDb();
+    const run = db
+      .prepare("SELECT * FROM runs WHERE id = ?")
+      .get(result.id) as {
+      id: string;
+      workflow_id: string;
+      status: string;
+      context: string;
+      created_at: string;
+      updated_at: string;
+    };
+
+    // Verify run exists in database
+    assert.ok(run, "run record should exist in database");
+
+    // Test verifies run.workflow_id matches input
+    assert.equal(run.workflow_id, workflowId, "run.workflow_id should match the input workflowId");
+  });
+
+  it("verifies run record status equals 'running' when created", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test run status",
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const run = db
+      .prepare("SELECT status FROM runs WHERE id = ?")
+      .get(result.id) as { status: string };
+
+    // Test verifies run.status equals 'running'
+    assert.equal(run.status, "running", "run.status should be 'running' when created");
+  });
+
+  it("verifies run record context is valid JSON with dry_run field", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test context JSON with dry_run",
+      dryRun: true,
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    // Test verifies context is valid JSON
+    let context: Record<string, string>;
+    try {
+      context = JSON.parse(run.context);
+    } catch (err) {
+      assert.fail(`context should be valid JSON: ${(err as Error).message}`);
+    }
+
+    // Verify context has dry_run field
+    assert.ok("dry_run" in context, "context should have dry_run field");
+    assert.equal(context.dry_run, "true", "dry_run should have correct value");
+  });
+
+  it("verifies run record has timestamp fields created_at and updated_at", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test timestamp fields",
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const run = db
+      .prepare("SELECT created_at, updated_at FROM runs WHERE id = ?")
+      .get(result.id) as { created_at: string; updated_at: string };
+
+    // Test verifies run has timestamp fields
+    assert.ok(run.created_at, "run should have created_at field");
+    assert.ok(run.updated_at, "run should have updated_at field");
+
+    // Verify timestamps are valid ISO strings
+    const createdDate = new Date(run.created_at);
+    const updatedDate = new Date(run.updated_at);
+    assert.ok(!isNaN(createdDate.getTime()), "created_at should be a valid timestamp");
+    assert.ok(!isNaN(updatedDate.getTime()), "updated_at should be a valid timestamp");
+  });
+
+  it("verifies full run record structure with all expected fields", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test full run record structure",
+      dryRun: false,
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const run = db
+      .prepare("SELECT * FROM runs WHERE id = ?")
+      .get(result.id) as Record<string, any>;
+
+    // Verify all expected fields exist
+    assert.ok(run.id, "run should have id field");
+    assert.ok(run.workflow_id, "run should have workflow_id field");
+    assert.ok(run.status, "run should have status field");
+    assert.ok(run.context, "run should have context field");
+    assert.ok(run.created_at, "run should have created_at field");
+    assert.ok(run.updated_at, "run should have updated_at field");
+
+    // Verify field types and values
+    assert.equal(typeof run.id, "string", "id should be a string");
+    assert.equal(typeof run.workflow_id, "string", "workflow_id should be a string");
+    assert.equal(typeof run.status, "string", "status should be a string");
+    assert.equal(typeof run.context, "string", "context should be a string");
+
+    // Verify values are correct
+    assert.equal(run.id, result.id, "id should match the returned run ID");
+    assert.equal(run.workflow_id, workflowId, "workflow_id should match input");
+    assert.equal(run.status, "running", "status should be 'running'");
+
+    // Verify context is valid JSON with dry_run
+    const context = JSON.parse(run.context);
+    assert.ok("dry_run" in context, "context should have dry_run field");
+    assert.equal(context.dry_run, "false", "dry_run should have correct value");
+  });
+});
+
+describe("US-005-old: dry_run is a string (not boolean) for template compatibility", () => {
   const testRunIds: string[] = [];
   const workflowIds: string[] = [];
 
