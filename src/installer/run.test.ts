@@ -400,3 +400,273 @@ describe("dry_run context is accessible in step templates", () => {
     assert.equal(context.new_field, "new_value", "new fields should be preserved");
   });
 });
+
+describe("US-005: dry_run is a string (not boolean) for template compatibility", () => {
+  const testRunIds: string[] = [];
+  const workflowIds: string[] = [];
+
+  afterEach(() => {
+    for (const runId of testRunIds) {
+      cleanupTestRun(runId);
+    }
+    testRunIds.length = 0;
+  });
+
+  it("dry_run context variable is type string, not boolean", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test dry_run type is string",
+      dryRun: true,
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    const context = JSON.parse(run.context);
+    
+    // Verify type is string, not boolean
+    assert.strictEqual(typeof context.dry_run, "string", "dry_run type must be string");
+    assert.notEqual(typeof context.dry_run, "boolean", "dry_run type must not be boolean");
+    assert.strictEqual(context.dry_run, "true", "string value should be 'true'");
+  });
+
+  it("dry_run value is either 'true' or 'false' (string literals)", async () => {
+    const workflowId1 = `test-workflow-${crypto.randomUUID()}`;
+    const workflowId2 = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId1, workflowId2);
+    createTestWorkflow(workflowId1);
+    createTestWorkflow(workflowId2);
+
+    // Test with dryRun=true
+    const result1 = await runWorkflow({
+      workflowId: workflowId1,
+      taskTitle: "Test true value",
+      dryRun: true,
+    });
+    testRunIds.push(result1.id);
+
+    // Test with dryRun=false
+    const result2 = await runWorkflow({
+      workflowId: workflowId2,
+      taskTitle: "Test false value",
+      dryRun: false,
+    });
+    testRunIds.push(result2.id);
+
+    const db = getDb();
+    
+    // Verify true case
+    let run1 = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result1.id) as { context: string };
+    let context1 = JSON.parse(run1.context);
+    assert.equal(context1.dry_run, "true", "dry_run with true should be string 'true'");
+    assert.ok(
+      context1.dry_run === "true" || context1.dry_run === "false",
+      "dry_run must be either 'true' or 'false'"
+    );
+
+    // Verify false case
+    let run2 = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result2.id) as { context: string };
+    let context2 = JSON.parse(run2.context);
+    assert.equal(context2.dry_run, "false", "dry_run with false should be string 'false'");
+    assert.ok(
+      context2.dry_run === "true" || context2.dry_run === "false",
+      "dry_run must be either 'true' or 'false'"
+    );
+  });
+
+  it("context JSON serialization maintains string type", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test JSON serialization",
+      dryRun: true,
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    // Test round-trip: JSON.stringify → JSON.parse → verify type
+    const serialized = run.context;
+    const context = JSON.parse(serialized);
+    const reserialized = JSON.stringify(context);
+
+    // Verify original serialization
+    assert.ok(serialized.includes('"dry_run":"true"'), "JSON should contain string value");
+    assert.ok(!serialized.includes('"dry_run":true'), "JSON should not contain boolean value");
+
+    // Verify re-serialization maintains type
+    const reparsed = JSON.parse(reserialized);
+    assert.strictEqual(typeof reparsed.dry_run, "string", "type should remain string after re-serialization");
+    assert.equal(reparsed.dry_run, "true", "value should be preserved");
+  });
+
+  it("string type dry_run is compatible with template engines expecting strings", async () => {
+    const { resolveTemplate } = await import("./step-ops.js");
+
+    // Template engine pattern: concatenate strings
+    const context: Record<string, string> = {
+      dry_run: "false",
+      command: "deploy",
+    };
+
+    // Test template that uses dry_run in conditional-like pattern
+    const template = "If {{dry_run}} equals 'false', execute {{command}}";
+    const resolved = resolveTemplate(template, context);
+
+    // Verify string comparison works
+    assert.equal(
+      resolved,
+      "If false equals 'false', execute deploy",
+      "string type should allow comparison with string literals"
+    );
+
+    // Test another pattern: string in URL or query parameter
+    const urlTemplate = "https://api.example.com/action?dryRun={{dry_run}}&task={{command}}";
+    const urlResolved = resolveTemplate(urlTemplate, context);
+    assert.equal(
+      urlResolved,
+      "https://api.example.com/action?dryRun=false&task=deploy",
+      "string type should work in URL templates"
+    );
+  });
+
+  it("dry_run string type is safe for equality comparisons", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test equality comparisons",
+      dryRun: true,
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    const context = JSON.parse(run.context);
+
+    // String comparisons
+    assert.equal(context.dry_run, "true", "string equality check");
+    assert.notEqual(context.dry_run, "false", "string inequality check");
+    assert.strictEqual(context.dry_run === "true", true, "strict equality with string literal");
+    assert.strictEqual(context.dry_run === true as any, false, "strict equality with boolean should be false");
+  });
+
+  it("template engine processes dry_run string correctly in conditional templates", async () => {
+    const { resolveTemplate } = await import("./step-ops.js");
+
+    // Simulate template that uses dry_run as a string flag
+    const contextDryTrue: Record<string, string> = {
+      dry_run: "true",
+      action: "log only",
+    };
+
+    const contextDryFalse: Record<string, string> = {
+      dry_run: "false",
+      action: "execute",
+    };
+
+    // Template that checks dry_run value
+    const template = "Mode: {{dry_run}} → {{action}}";
+
+    const resultTrue = resolveTemplate(template, contextDryTrue);
+    assert.equal(resultTrue, "Mode: true → log only", "template should handle dry_run=true as string");
+
+    const resultFalse = resolveTemplate(template, contextDryFalse);
+    assert.equal(resultFalse, "Mode: false → execute", "template should handle dry_run=false as string");
+  });
+
+  it("context JSON maintains string type across database updates", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test JSON type persistence",
+      dryRun: false,
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+
+    // Retrieve initial context
+    let run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+    let context = JSON.parse(run.context);
+    assert.strictEqual(typeof context.dry_run, "string", "initial dry_run should be string");
+    assert.equal(context.dry_run, "false", "initial value should be 'false'");
+
+    // Update context (simulate step completion adding more context)
+    context.output = "Step completed";
+    db.prepare("UPDATE runs SET context = ? WHERE id = ?").run(
+      JSON.stringify(context),
+      result.id
+    );
+
+    // Verify dry_run type is still string after update
+    run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+    context = JSON.parse(run.context);
+    
+    assert.strictEqual(typeof context.dry_run, "string", "dry_run should remain string after update");
+    assert.equal(context.dry_run, "false", "dry_run value should be preserved");
+    assert.strictEqual(typeof context.output, "string", "new context values should also be strings");
+  });
+
+  it("all context fields are strings (Record<string, string>) including dry_run", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Test context Record<string, string>",
+      dryRun: true,
+    });
+    testRunIds.push(result.id);
+
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    const context = JSON.parse(run.context);
+
+    // Verify all fields are strings
+    for (const [key, value] of Object.entries(context)) {
+      assert.strictEqual(
+        typeof value,
+        "string",
+        `context field '${key}' should be string, got ${typeof value}`
+      );
+    }
+
+    // Specifically verify dry_run
+    assert.strictEqual(typeof context.dry_run, "string", "dry_run specifically must be string");
+    assert.strictEqual(typeof context.task, "string", "task field must be string");
+  });
+});
