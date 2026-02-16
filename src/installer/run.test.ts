@@ -2015,3 +2015,138 @@ steps:
     }
   });
 });
+
+describe("US-010: Error handling test: Verify runWorkflow handles missing workflow gracefully", () => {
+  it("throws error when calling runWorkflow with non-existent workflow ID", async () => {
+    const nonExistentWorkflowId = `nonexistent-workflow-${crypto.randomUUID()}`;
+    
+    // Verify error is thrown when workflow directory doesn't exist
+    let errorThrown = false;
+    let thrownError: Error | null = null;
+    
+    try {
+      await runWorkflow({
+        workflowId: nonExistentWorkflowId,
+        taskTitle: "Test task",
+      });
+    } catch (err) {
+      errorThrown = true;
+      thrownError = err as Error;
+    }
+    
+    assert.ok(errorThrown, "Error should be thrown for non-existent workflow");
+    assert.ok(thrownError, "Error object should be captured");
+    assert.ok(thrownError instanceof Error, "Error should be an Error instance");
+    assert.ok(thrownError.message.length > 0, "Error should have a descriptive message");
+  });
+
+  it("verifies error message is descriptive for missing workflow", async () => {
+    const nonExistentWorkflowId = `missing-workflow-${crypto.randomUUID()}`;
+    
+    try {
+      await runWorkflow({
+        workflowId: nonExistentWorkflowId,
+        taskTitle: "Test task",
+      });
+      assert.fail("Should have thrown an error for non-existent workflow");
+    } catch (err) {
+      const error = err as Error;
+      // Error message should contain useful information about the missing file or directory
+      assert.ok(
+        error.message.includes("ENOENT") || 
+        error.message.includes("no such file") ||
+        error.message.includes("does not exist") ||
+        error.message.includes("workflow.yml"),
+        `Error message should be descriptive, got: ${error.message}`
+      );
+    }
+  });
+
+  it("verifies no run record is created when workflow is missing", async () => {
+    const nonExistentWorkflowId = `missing-workflow-${crypto.randomUUID()}`;
+    const db = getDb();
+    
+    // Count runs before attempt
+    const runsBefore = db.prepare("SELECT COUNT(*) as count FROM runs").get() as { count: number };
+    const initialRunCount = runsBefore.count;
+    
+    // Try to run non-existent workflow
+    try {
+      await runWorkflow({
+        workflowId: nonExistentWorkflowId,
+        taskTitle: "Test task",
+      });
+    } catch {
+      // Error expected - we're testing error handling
+    }
+    
+    // Count runs after attempt
+    const runsAfter = db.prepare("SELECT COUNT(*) as count FROM runs").get() as { count: number };
+    const finalRunCount = runsAfter.count;
+    
+    // Verify no new run was created
+    assert.equal(finalRunCount, initialRunCount, "No run record should be created for missing workflow");
+  });
+
+  it("verifies database is clean and not in inconsistent state after error", async () => {
+    const nonExistentWorkflowId = `missing-workflow-${crypto.randomUUID()}`;
+    const db = getDb();
+    
+    // Get initial database state
+    const initialRuns = db.prepare("SELECT COUNT(*) as count FROM runs").get() as { count: number };
+    const initialSteps = db.prepare("SELECT COUNT(*) as count FROM steps").get() as { count: number };
+    
+    // Try to run non-existent workflow
+    try {
+      await runWorkflow({
+        workflowId: nonExistentWorkflowId,
+        taskTitle: "Test task",
+      });
+    } catch {
+      // Error expected - we're testing error handling
+    }
+    
+    // Get final database state
+    const finalRuns = db.prepare("SELECT COUNT(*) as count FROM runs").get() as { count: number };
+    const finalSteps = db.prepare("SELECT COUNT(*) as count FROM steps").get() as { count: number };
+    
+    // Verify database is in same state (no partial data created)
+    assert.equal(finalRuns.count, initialRuns.count, "Run count should not change after error");
+    assert.equal(finalSteps.count, initialSteps.count, "Step count should not change after error");
+  });
+
+  it("verifies error is thrown before any database writes occur", async () => {
+    const nonExistentWorkflowId = `missing-workflow-${crypto.randomUUID()}`;
+    const db = getDb();
+    
+    // Get initial run count
+    const runsBefore = db.prepare("SELECT COUNT(*) as count FROM runs").get() as { count: number };
+    const stepsBefore = db.prepare("SELECT COUNT(*) as count FROM steps").get() as { count: number };
+    
+    let errorThrown = false;
+    let thrownError: Error | null = null;
+    
+    try {
+      await runWorkflow({
+        workflowId: nonExistentWorkflowId,
+        taskTitle: "Error handling test",
+      });
+    } catch (err) {
+      errorThrown = true;
+      thrownError = err as Error;
+    }
+    
+    // Verify error was thrown with descriptive message
+    assert.ok(errorThrown, "Error must be thrown");
+    assert.ok(thrownError, "Error object must exist");
+    assert.ok(thrownError instanceof Error, "Must be an Error instance");
+    assert.ok(thrownError.message.length > 0, "Error must have a message");
+    
+    // Verify no database writes occurred
+    const runsAfter = db.prepare("SELECT COUNT(*) as count FROM runs").get() as { count: number };
+    const stepsAfter = db.prepare("SELECT COUNT(*) as count FROM steps").get() as { count: number };
+    
+    assert.equal(runsAfter.count, runsBefore.count, "No run record should be written");
+    assert.equal(stepsAfter.count, stepsBefore.count, "No step records should be written");
+  });
+});
