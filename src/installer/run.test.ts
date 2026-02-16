@@ -401,6 +401,158 @@ describe("dry_run context is accessible in step templates", () => {
   });
 });
 
+describe("US-004: Unit test: Verify task and dry_run both present in context", () => {
+  const testRunIds: string[] = [];
+  const workflowIds: string[] = [];
+
+  afterEach(() => {
+    for (const runId of testRunIds) {
+      cleanupTestRun(runId);
+    }
+    testRunIds.length = 0;
+  });
+
+  it("verifies context contains both task and dry_run fields with correct values", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    const specificTaskTitle = "Verify task and dry_run both present in context";
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    // Call runWorkflow with a specific task title
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: specificTaskTitle,
+      dryRun: false,
+    });
+    testRunIds.push(result.id);
+
+    // Query database for run context
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    // Verify context is valid JSON
+    let context;
+    try {
+      context = JSON.parse(run.context);
+    } catch (err) {
+      assert.fail(`context should be valid parseable JSON, got error: ${(err as Error).message}`);
+    }
+
+    // Verify context contains 'task' field matching task title
+    assert.ok("task" in context, "context should contain 'task' field");
+    assert.equal(context.task, specificTaskTitle, "task field should match provided task title");
+
+    // Verify context contains 'dry_run' field with correct value
+    assert.ok("dry_run" in context, "context should contain 'dry_run' field");
+    assert.equal(context.dry_run, "false", "dry_run field should have correct value 'false'");
+  });
+
+  it("verifies context contains task and dry_run when dryRun=true", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    const taskTitle = "Test task with dryRun enabled";
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    // Call runWorkflow with dryRun=true
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle,
+      dryRun: true,
+    });
+    testRunIds.push(result.id);
+
+    // Query database and verify both fields exist
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    // Verify JSON is parseable
+    const context = JSON.parse(run.context);
+
+    // Verify both fields are present
+    assert.ok("task" in context, "task field should be present");
+    assert.ok("dry_run" in context, "dry_run field should be present");
+
+    // Verify values are correct
+    assert.equal(context.task, taskTitle, "task should match provided title");
+    assert.equal(context.dry_run, "true", "dry_run should be 'true'");
+  });
+
+  it("verifies context contains task and dry_run when dryRun parameter is undefined", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    const taskTitle = "Test task without dryRun parameter";
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    // Call runWorkflow without dryRun parameter (should default to false)
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle,
+    });
+    testRunIds.push(result.id);
+
+    // Verify both fields are present in context
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    const context = JSON.parse(run.context);
+
+    // Both fields must be present
+    assert.ok("task" in context, "task field should be present even without dryRun param");
+    assert.ok("dry_run" in context, "dry_run field should be present and default to 'false'");
+
+    // Verify correct values
+    assert.equal(context.task, taskTitle, "task field should match provided title");
+    assert.equal(context.dry_run, "false", "dry_run should default to 'false'");
+  });
+
+  it("verifies context JSON is valid and contains both task and dry_run fields", async () => {
+    const workflowId = `test-workflow-${crypto.randomUUID()}`;
+    workflowIds.push(workflowId);
+    createTestWorkflow(workflowId);
+
+    const result = await runWorkflow({
+      workflowId,
+      taskTitle: "Context JSON validation test",
+      dryRun: false,
+    });
+    testRunIds.push(result.id);
+
+    // Get raw context string from database
+    const db = getDb();
+    const run = db
+      .prepare("SELECT context FROM runs WHERE id = ?")
+      .get(result.id) as { context: string };
+
+    // Verify it's valid JSON by parsing it
+    let parsedContext: Record<string, string>;
+    try {
+      parsedContext = JSON.parse(run.context);
+    } catch (err) {
+      assert.fail(`context should be valid JSON: ${(err as Error).message}`);
+    }
+
+    // Verify both required fields are present
+    assert.strictEqual(typeof parsedContext, "object", "parsed context should be an object");
+    assert.ok(parsedContext !== null, "parsed context should not be null");
+    assert.ok("task" in parsedContext, "parsed context must contain 'task' field");
+    assert.ok("dry_run" in parsedContext, "parsed context must contain 'dry_run' field");
+
+    // Verify field types are strings
+    assert.strictEqual(typeof parsedContext.task, "string", "task should be a string");
+    assert.strictEqual(typeof parsedContext.dry_run, "string", "dry_run should be a string");
+
+    // Verify values are non-empty
+    assert.ok(parsedContext.task.length > 0, "task should not be empty");
+    assert.ok(["true", "false"].includes(parsedContext.dry_run), "dry_run should be 'true' or 'false'");
+  });
+});
+
 describe("US-005: dry_run is a string (not boolean) for template compatibility", () => {
   const testRunIds: string[] = [];
   const workflowIds: string[] = [];
